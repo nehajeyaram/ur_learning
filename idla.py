@@ -19,8 +19,8 @@ def pref(w):
 def suff(w):
 	return {w[j:] for j in range(len(w) + 1)};
 
-# wedge
-def wedge(S):
+# supp
+def supp(S):
 	s = "";
 	for sp in S:
 		if len(sp) > len(s):
@@ -37,7 +37,7 @@ def lcp(S):
 		Sp = Sp | pref(w);
 	for w in S: # common set of prefixes
 		Sp = Sp & pref(w);
-	return wedge(Sp);
+	return supp(Sp);
 
 # Longest Common Suffix
 #     S: set of strings
@@ -49,7 +49,7 @@ def lcs(S):
 		Sp = Sp | suff(w);
 	for w in S: # common set of suffixes
 		Sp = Sp & suff(w);
-	return wedge(Sp);
+	return supp(Sp);
 
 
 ### BEGIN extending FST ###
@@ -97,35 +97,29 @@ def form_fh(Tgf):
 def environment(Tgf, fh):
 	# collecting
 	prefixes = set();
-	suffixes = set();
-	underlying = None;
-	surface = None;
+	varsigma = set();
+	vartheta = set();
 	for edge in Tgf.ET:
 		und = Tgf.stout[edge[0]] + fh[edge[1]];
 		sur = edge[2] + Tgf.stout[edge[3]];
 		if und != sur: # then is an alternating terminal
 			prefix = Tgf.sig(edge[0]).removesuffix(Tgf.stout[edge[0]]);
-			suffix = lcs({ und, sur });
 
 			prefixes.add(prefix);
-			suffixes.add(suffix);
-
-			if underlying or surface is None:
-				underlying = und[0];
-				surface = sur.removesuffix(suffix);
+			varsigma.add(und);
+			vartheta.add(sur);
 
 	# common portions of environment
 	print(f"prefixes: {prefixes}");
-	print(f"suffixes: {suffixes}");
 
-	leftcxt = lcs(prefixes);
-	rightcxt = lcp(suffixes);
+	pg = lcs(prefixes);
+	sg = lcp(varsigma);
+	tg = lcp(vartheta);
+	print(f"/{sg}/ -> [{tg}] / {pg}_"); # DEBUG
 
-	print(f"/{underlying}/ -> [{surface}] / {leftcxt}_{rightcxt}"); # DEBUG
+	return pg, sg, tg;
 
-	return leftcxt, underlying, surface, rightcxt;
-
-def construct_Tg(genv, ggenv, p, Tgf, fh):
+def construct_Tg(p, s, t, Tgf, fh):
 	# form Sigma, Gamma
 	Sigma = set();
 	for x in fh.values():
@@ -135,50 +129,60 @@ def construct_Tg(genv, ggenv, p, Tgf, fh):
 	Tg = FST(Sigma, Gamma);
 
 	# initialise states
-	Q = pref(genv) - {genv};
+	Q = pref(p + s) - { p + s };
 	Tg.Q = list(Q);
-	Tg.qe = "";
-	print(Q); # DEBUG
-
 	Tg.stout = {};
-	for qx in Q: # and state output
-		# TODO: I'm sure there's a better way to do this...
-		sigma = "";
-		if p in pref(qx):
-			sigma = qx.removeprefix(p);
-		Tg.stout[qx] = sigma;
-		print(f"sigma[{qx}] = {sigma}"); # DEBUG
-
-	# construct edges
 	E = set();
+	Tg.qe = "";
+
+	print(Q); # DEBUG
 	for q_i in Tg.Q:
-		for u in Sigma:
-			q_j = q_i + u; # target state
-			if q_j not in pref(genv) - {genv}: # terminal
-				if q_j == genv: # alternating terminal
-					v = ggenv.removeprefix(p);
+		sigma = "";
+		if len(q_i) > len(p):
+			sigma = q_i.removeprefix(p);
+		Tg.stout[q_i] = sigma;
+	print(Tg.stout);
+
+	for q_i in Tg.Q:
+		# construct edges
+		for a in Sigma:
+			q_j = q_i + a; # target state
+			u = a;
+			if q_j not in pref(p + s) - {p + s}: # terminal
+				if q_j == p + s: # alternating terminal
+					u = t;
 				else: # non-alternating
-					v = Tg.stout[q_i] + u;
-				q_j = lcp({genv, u});
+					u = Tg.stout[q_i] + a;
+				q_j = lcp({ p + s, a });
+				u = u.removesuffix(Tg.stout[q_j]);
 			else: # non-terminal (target state exists)
 				if Tg.stout[q_j] != "": # are we working on the d-suffix?
-					v = ""; # delay output
+					u = ""; # delay output
 				else: # identity function
-					v = u;
-			E.add( (q_i, u, v, q_j) );
+					u = a;
+			E.add( (q_i, a, u, q_j) );
 	Tg.E = list(E);
 	return Tg;
 
-def construct_Tf(genv, ggenv, fh):
+def construct_Tf(p, s, t, fh):
 	Sigma = set(fh.keys());
 	Q = {""};
 	sigma = {"": ""};
 	E = set();
-	for u in Sigma:
-		v = fh[u];
-		if v == ggenv:
-			v = genv;
-		E.add(("", u, v, ""));
+	v = p + t;
+	kp = len(v); # k'
+	for a in Sigma:
+		i = kp;
+		while i <= len(fh[a]):
+			u = fh[a][:i - kp];
+			w = fh[a][:i];
+			if w.removeprefix(u) == v:
+				fh[a] = u + p + s + fh[a][i:];
+				i = i + kp;
+			else:
+				i = i + 1;
+		# done
+		E.add(("", a, fh[a], ""));
 
 
 	T_f = FST(Sigma, set(fh.values()));
@@ -197,21 +201,18 @@ def idla(D, Sigma, Gamma):
 	print(f"\tLearning from Dataset: {D}");
 
 	# form T_g(f)
-	Tgf = ostia(D, Sigma, Gamma)
-	print(f"Tgf Edges:\t{Tgf.E}");
-	print(f"Tgf sigma:\t{Tgf.stout}");
+	Th = ostia(D, Sigma, Gamma)
+	print(f"Th Edges:\t{Th.E}");
+	print(f"Th sigma:\t{Th.stout}");
 
 	# form f^h
-	fh = form_fh(Tgf);
+	fh = form_fh(Th);
 	print(f"\tf^h:{fh}"); # DEBUG
 	# collate
-	leftcxt, underlying, surface, rightcxt = environment(Tgf, fh);
-	# construct genv, g(genv)
-	genv = leftcxt + underlying + rightcxt;
-	ggenv = leftcxt + surface + rightcxt;
+	p, s, t = environment(Th, fh);
 	# construct Tf
-	Tf = construct_Tf(genv, ggenv, fh);
+	Tf = construct_Tf(p, s, t, fh);
 	# construct T_g
-	Tg = construct_Tg(genv, ggenv, leftcxt, Tgf, fh);
+	Tg = construct_Tg(p, s, t, Th, fh);
 
 	return Tf, Tg;
